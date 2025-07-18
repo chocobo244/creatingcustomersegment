@@ -9,6 +9,7 @@ from frontend.pages import (
     dashboard,
     data_ingestion,
     attribution_analysis,
+    b2b_attribution,
     channel_performance,
     customer_journey,
     settings as settings_page
@@ -137,7 +138,8 @@ def render_sidebar():
         pages = {
             "📈 Dashboard": "Dashboard",
             "📥 Data Ingestion": "Data Ingestion", 
-            "🎯 Attribution Analysis": "Attribution Analysis",
+            "🎯 B2B Attribution": "B2B Attribution",
+            "🔄 Attribution Analysis": "Attribution Analysis",
             "📺 Channel Performance": "Channel Performance",
             "🛤️ Customer Journey": "Customer Journey",
             "⚙️ Settings": "Settings"
@@ -179,6 +181,8 @@ def render_main_content():
         dashboard.render()
     elif current_page == "Data Ingestion":
         data_ingestion.render()
+    elif current_page == "B2B Attribution":
+        b2b_attribution.main()
     elif current_page == "Attribution Analysis":
         attribution_analysis.render()
     elif current_page == "Channel Performance":
