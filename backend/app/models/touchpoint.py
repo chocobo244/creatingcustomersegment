@@ -15,7 +15,7 @@ from .base import Base
 class Touchpoint(Base):
     """Model representing a customer touchpoint/interaction."""
     
-    __tablename__ = "touchpoints"
+    __tablename__ = "touchpoint"
     
     # Customer information
     customer_id = Column(
@@ -36,12 +36,12 @@ class Touchpoint(Base):
     channel_id = Column(
         UUID(as_uuid=True),
         ForeignKey("channel.id"),
-        nullable=False,
+        nullable=True,
         index=True
     )
     
     # Touchpoint details
-    touchpoint_timestamp = Column(
+    timestamp = Column(
         DateTime(timezone=True),
         nullable=False,
         index=True
@@ -122,28 +122,29 @@ class Touchpoint(Base):
     customer = relationship("Customer", back_populates="touchpoints")
     campaign = relationship("Campaign", back_populates="touchpoints")
     channel = relationship("Channel", back_populates="touchpoints")
+    conversion = relationship("Conversion", back_populates="touchpoints", uselist=False)
     
     # Indexes for common query patterns
     __table_args__ = (
         Index(
-            "ix_touchpoints_customer_timestamp",
+            "ix_touchpoint_customer_timestamp",
             "customer_id",
-            "touchpoint_timestamp"
+            "timestamp"
         ),
         Index(
-            "ix_touchpoints_channel_timestamp",
+            "ix_touchpoint_channel_timestamp",
             "channel_id", 
-            "touchpoint_timestamp"
+            "timestamp"
         ),
         Index(
-            "ix_touchpoints_campaign_timestamp",
+            "ix_touchpoint_campaign_timestamp",
             "campaign_id",
-            "touchpoint_timestamp"
+            "timestamp"
         ),
         Index(
-            "ix_touchpoints_type_timestamp",
+            "ix_touchpoint_type_timestamp",
             "touchpoint_type",
-            "touchpoint_timestamp"
+            "timestamp"
         ),
     )
     
@@ -153,7 +154,7 @@ class Touchpoint(Base):
             f"customer_id={self.customer_id}, "
             f"channel_id={self.channel_id}, "
             f"type={self.touchpoint_type}, "
-            f"timestamp={self.touchpoint_timestamp}"
+            f"timestamp={self.timestamp}"
             f")>"
         )
     
