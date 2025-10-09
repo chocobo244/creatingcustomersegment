@@ -5,11 +5,25 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-import pandas as pd
-from sqlalchemy import select
+try:
+    import pandas as pd  # type: ignore
+except Exception:  # pandas is optional in this environment
+    pd = None  # type: ignore
 
-from backend.app.models.customer import Customer
-from backend.app.utils.logging import LoggerMixin
+try:
+    from backend.app.utils.logging import LoggerMixin
+except Exception:  # fallback minimal logger
+    class LoggerMixin:  # type: ignore
+        @property
+        def logger(self):
+            class _L:
+                def info(self, *a, **k):
+                    pass
+                def error(self, *a, **k):
+                    pass
+                def warning(self, *a, **k):
+                    pass
+            return _L()
 
 
 class CustomerSegmentationService(LoggerMixin):
@@ -45,30 +59,40 @@ class CustomerSegmentationService(LoggerMixin):
         if not customers:
             return {"segments": {}, "centroids": [], "features": features}
 
-        df = self._customers_to_dataframe(customers, features)
-        if df.empty:
-            return {"segments": {}, "centroids": [], "features": features}
+        # If pandas is available, use it; otherwise do a pure-Python fallback
+        if pd is not None:
+            df = self._customers_to_dataframe(customers, features)
+            if df.empty:
+                return {"segments": {}, "centroids": [], "features": features}
 
-        # Fill missing values
-        df_filled = df.fillna(0)
+            # Fill missing values
+            df_filled = df.fillna(0)
 
-        # Train k-means (import lazily to avoid heavy import at startup)
-        try:
-            from sklearn.cluster import KMeans  # type: ignore
-        except Exception:
-            # Fallback: simple quantile-based bucketing if sklearn unavailable
-            labels = self._quantile_bucket_labels(df_filled, num_clusters)
+            # Train k-means (import lazily to avoid heavy import at startup)
+            try:
+                from sklearn.cluster import KMeans  # type: ignore
+            except Exception:
+                # Fallback: simple quantile-based bucketing if sklearn unavailable
+                labels = self._quantile_bucket_labels_df(df_filled, num_clusters)
+                customer_ids = [str(c.id) for c in customers]
+                segments = {customer_ids[i]: int(labels[i]) for i in range(len(customer_ids))}
+                return {"segments": segments, "centroids": [], "features": features}
+
+            model = KMeans(n_clusters=num_clusters, n_init=10, random_state=42)
+            labels = model.fit_predict(df_filled.values)
+
+            # Build response
             customer_ids = [str(c.id) for c in customers]
             segments = {customer_ids[i]: int(labels[i]) for i in range(len(customer_ids))}
-            return {"segments": segments, "centroids": [], "features": features}
-
-        model = KMeans(n_clusters=num_clusters, n_init=10, random_state=42)
-        labels = model.fit_predict(df_filled.values)
-
-        # Build response
-        customer_ids = [str(c.id) for c in customers]
-        segments = {customer_ids[i]: int(labels[i]) for i in range(len(customer_ids))}
-        centroids = model.cluster_centers_.tolist()
+            centroids = model.cluster_centers_.tolist()
+        else:
+            # Pure-Python fallback: quantile bucketing on the first feature
+            matrix = self._extract_feature_matrix(customers, features)
+            first_feature = [row[0] if row else 0.0 for row in matrix]
+            labels = self._quantile_bucket_labels_list(first_feature, num_clusters)
+            customer_ids = [str(c.id) for c in customers]
+            segments = {customer_ids[i]: int(labels[i]) for i in range(len(customer_ids))}
+            centroids = []
 
         self.logger.info(
             "Customer segmentation computed",
@@ -88,43 +112,78 @@ class CustomerSegmentationService(LoggerMixin):
 
         # Load customers again to compute aggregates
         customers = await self._load_customers(db_session)
-        df = self._customers_to_dataframe(customers, list(self.DEFAULT_FEATURES))
-        df_filled = df.fillna(0)
-
-        # Attach labels
-        df_filled["segment"] = [segments.get(str(c.id), -1) for c in customers]
-
         insights: List[str] = []
         summary: Dict[str, Dict[str, float]] = {}
-        for segment_id, group in df_filled.groupby("segment"):
-            seg_summary = {
-                "avg_total_conversions": float(group["total_conversions"].mean()),
-                "avg_total_value": float(group["total_conversion_value"].mean()),
-                "avg_touchpoints": float(group["total_touchpoints"].mean()),
-            }
-            summary[str(int(segment_id))] = seg_summary
 
-            # Narrative insight
-            insights.append(
-                f"Segment {int(segment_id)}: avg conversions {seg_summary['avg_total_conversions']:.2f}, "
-                f"avg value ${seg_summary['avg_total_value']:.2f}, avg touchpoints {seg_summary['avg_touchpoints']:.1f}."
-            )
+        if pd is not None:
+            df = self._customers_to_dataframe(customers, list(self.DEFAULT_FEATURES))
+            df_filled = df.fillna(0)
+            df_filled["segment"] = [segments.get(str(c.id), -1) for c in customers]
+
+            for segment_id, group in df_filled.groupby("segment"):
+                seg_summary = {
+                    "avg_total_conversions": float(group["total_conversions"].mean()),
+                    "avg_total_value": float(group["total_conversion_value"].mean()),
+                    "avg_touchpoints": float(group["total_touchpoints"].mean()),
+                }
+                summary[str(int(segment_id))] = seg_summary
+                insights.append(
+                    f"Segment {int(segment_id)}: avg conversions {seg_summary['avg_total_conversions']:.2f}, "
+                    f"avg value ${seg_summary['avg_total_value']:.2f}, avg touchpoints {seg_summary['avg_touchpoints']:.1f}."
+                )
+        else:
+            # Pure-Python aggregation
+            buckets: Dict[int, Dict[str, float]] = {}
+            counts: Dict[int, int] = {}
+            for c in customers:
+                seg = int(segments.get(str(c.id), -1))
+                if seg not in buckets:
+                    buckets[seg] = {
+                        "total_conversions": 0.0,
+                        "total_conversion_value": 0.0,
+                        "total_touchpoints": 0.0,
+                    }
+                    counts[seg] = 0
+                buckets[seg]["total_conversions"] += float(getattr(c, "total_conversions", 0) or 0)
+                buckets[seg]["total_conversion_value"] += float(getattr(c, "total_conversion_value", 0.0) or 0.0)
+                buckets[seg]["total_touchpoints"] += float(getattr(c, "total_touchpoints", 0) or 0)
+                counts[seg] += 1
+
+            for seg, vals in buckets.items():
+                n = max(1, counts.get(seg, 1))
+                seg_summary = {
+                    "avg_total_conversions": vals["total_conversions"] / n,
+                    "avg_total_value": vals["total_conversion_value"] / n,
+                    "avg_touchpoints": vals["total_touchpoints"] / n,
+                }
+                summary[str(seg)] = {k: float(v) for k, v in seg_summary.items()}
+                insights.append(
+                    f"Segment {seg}: avg conversions {seg_summary['avg_total_conversions']:.2f}, "
+                    f"avg value ${seg_summary['avg_total_value']:.2f}, avg touchpoints {seg_summary['avg_touchpoints']:.1f}."
+                )
 
         return {"summary": summary, "insights": insights}
 
-    async def _load_customers(self, db_session: Any) -> List[Customer]:
+    async def _load_customers(self, db_session: Any) -> List[Any]:
+        try:
+            # Import locally to avoid hard dependency at module import time
+            from sqlalchemy import select as sa_select  # type: ignore
+            from backend.app.models.customer import Customer as SA_Customer  # type: ignore
+        except Exception:
+            return []
         try:
             # Support both sync and async sessions
             if hasattr(db_session, "execute") and db_session.__class__.__name__.lower().startswith("async"):  # type: ignore[attr-defined]
-                result = await db_session.execute(select(Customer))  # type: ignore[misc]
+                result = await db_session.execute(sa_select(SA_Customer))  # type: ignore[misc]
                 return list(result.scalars().all())
             else:
-                result = db_session.execute(select(Customer))  # type: ignore[misc]
+                result = db_session.execute(sa_select(SA_Customer))  # type: ignore[misc]
                 return list(result.scalars().all())
         except Exception:
             return []
 
-    def _customers_to_dataframe(self, customers: List[Customer], features: List[str]) -> pd.DataFrame:
+    def _customers_to_dataframe(self, customers: List[Any], features: List[str]):  # type: ignore[override]
+        assert pd is not None
         rows: List[Dict[str, Any]] = []
         for c in customers:
             row: Dict[str, Any] = {f: float(getattr(c, f, 0) or 0) for f in features}
@@ -134,7 +193,14 @@ class CustomerSegmentationService(LoggerMixin):
             return pd.DataFrame(columns=["id", *features])
         return pd.DataFrame(rows).set_index("id")
 
-    def _quantile_bucket_labels(self, df: pd.DataFrame, k: int) -> List[int]:
+    def _extract_feature_matrix(self, customers: List[Customer], features: List[str]) -> List[List[float]]:
+        matrix: List[List[float]] = []
+        for c in customers:
+            row = [float(getattr(c, f, 0) or 0) for f in features]
+            matrix.append(row)
+        return matrix
+
+    def _quantile_bucket_labels_df(self, df: 'pd.DataFrame', k: int) -> List[int]:
         # Use the first feature to produce k quantile buckets as a rough fallback
         if df.shape[0] == 0:
             return []
@@ -146,6 +212,29 @@ class CustomerSegmentationService(LoggerMixin):
             labels = q.fillna(0).astype(int).tolist()
         except Exception:
             labels = [0] * df.shape[0]
+        return labels
+
+    def _quantile_bucket_labels_list(self, values: List[float], k: int) -> List[int]:
+        n = len(values)
+        if n == 0:
+            return []
+        if k <= 1:
+            return [0] * n
+        # Compute quantile thresholds
+        sorted_vals = sorted((v if v is not None else 0.0) for v in values)
+        thresholds: List[float] = []
+        for i in range(1, k):
+            idx = int(round(i * n / k)) - 1
+            idx = min(max(idx, 0), n - 1)
+            thresholds.append(sorted_vals[idx])
+        # Assign labels
+        labels: List[int] = []
+        for v in values:
+            label = 0
+            for t in thresholds:
+                if v > t:
+                    label += 1
+            labels.append(min(label, k - 1))
         return labels
 
 
