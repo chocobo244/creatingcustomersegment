@@ -140,7 +140,6 @@ class B2BAttributionService(LoggerMixin):
         touchpoint_query = (
             select(Touchpoint)
             .options(selectinload(Touchpoint.customer))
-            .options(selectinload(Touchpoint.conversion))
         )
         
         if conditions:
@@ -159,9 +158,8 @@ class B2BAttributionService(LoggerMixin):
         
         # Load conversions (opportunities)
         conversion_query = (
-            select(Conversion)
-            .options(selectinload(Conversion.customer))
-            .options(selectinload(Conversion.touchpoints))
+                select(Conversion)
+                .options(selectinload(Conversion.customer))
         )
         if account_ids:
             conversion_query = conversion_query.where(Conversion.customer_id.in_(account_ids))
@@ -266,7 +264,37 @@ class B2BAttributionService(LoggerMixin):
         touchpoint_data = []
         
         for touchpoint in touchpoints:
-            # Map generic touchpoint types to B2B types
+            # Derive a channel name robustly (supports relationship or string or fallbacks)
+            channel_attr = getattr(touchpoint, 'channel', None)
+            if channel_attr is not None and hasattr(channel_attr, 'name'):
+                channel_name = str(getattr(channel_attr, 'name'))
+            elif isinstance(channel_attr, str):
+                channel_name = channel_attr
+            else:
+                # Fallback to type-derived channel
+                tp_type_lower = str(getattr(touchpoint, 'touchpoint_type', '') or '').lower()
+                if 'email' in tp_type_lower:
+                    channel_name = 'email'
+                elif 'webinar' in tp_type_lower:
+                    channel_name = 'webinar'
+                elif 'demo' in tp_type_lower:
+                    channel_name = 'demo'
+                elif 'call' in tp_type_lower or 'phone' in tp_type_lower:
+                    channel_name = 'phone'
+                elif 'social' in tp_type_lower:
+                    channel_name = 'social'
+                elif 'trade' in tp_type_lower:
+                    channel_name = 'trade_show'
+                elif 'referral' in tp_type_lower:
+                    channel_name = 'referral'
+                elif 'direct_mail' in tp_type_lower:
+                    channel_name = 'direct_mail'
+                elif 'content' in tp_type_lower or 'download' in tp_type_lower:
+                    channel_name = 'content'
+                else:
+                    channel_name = 'website'
+
+            # Map generic types to engine TouchpointType
             type_mapping = {
                 'email': TouchpointType.EMAIL_ENGAGEMENT,
                 'website': TouchpointType.WEBSITE_VISIT,
@@ -276,16 +304,14 @@ class B2BAttributionService(LoggerMixin):
                 'webinar': TouchpointType.WEBINAR_ATTENDANCE,
                 'demo': TouchpointType.DEMO_REQUEST,
                 'call': TouchpointType.SALES_CALL,
+                'phone': TouchpointType.SALES_CALL,
                 'trade_show': TouchpointType.TRADE_SHOW,
                 'referral': TouchpointType.REFERRAL,
                 'direct_mail': TouchpointType.DIRECT_MAIL
             }
-            
-            touchpoint_type = type_mapping.get(
-                touchpoint.channel.lower(), 
-                TouchpointType.WEBSITE_VISIT
-            )
-            
+
+            touchpoint_type = type_mapping.get(channel_name.lower(), TouchpointType.WEBSITE_VISIT)
+
             # Determine stage influence based on touchpoint type and channel
             if touchpoint_type in [TouchpointType.DEMO_REQUEST, TouchpointType.SALES_CALL]:
                 stage_influence = B2BStageType.EVALUATION
@@ -300,8 +326,9 @@ class B2BAttributionService(LoggerMixin):
             sales_channels = ['call', 'sales_call', 'demo', 'phone']
             marketing_channels = ['email', 'social', 'content', 'webinar', 'website', 'search']
             
-            is_sales_touch = touchpoint.channel.lower() in sales_channels
-            is_marketing_touch = touchpoint.channel.lower() in marketing_channels
+            lower_channel = channel_name.lower()
+            is_sales_touch = lower_channel in sales_channels
+            is_marketing_touch = lower_channel in marketing_channels
             
             # If it's a demo request, it's both sales and marketing
             if touchpoint_type == TouchpointType.DEMO_REQUEST:
@@ -314,7 +341,7 @@ class B2BAttributionService(LoggerMixin):
                 account_id=touchpoint.customer_id,
                 timestamp=touchpoint.timestamp,
                 touchpoint_type=touchpoint_type,
-                channel=touchpoint.channel,
+                channel=channel_name,
                 campaign_id=getattr(touchpoint, 'campaign_id', None),
                 content_id=getattr(touchpoint, 'content_id', None),
                 engagement_score=getattr(touchpoint, 'engagement_score', 50.0),
@@ -341,7 +368,7 @@ class B2BAttributionService(LoggerMixin):
                 model_name="B2B_Marketing_Attribution",
                 results=results,
                 created_at=datetime.utcnow(),
-                metadata={
+                extra_metadata={
                     'account_ids': account_ids,
                     'model_type': 'b2b_comprehensive'
                 }
